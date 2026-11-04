@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  leadgen_bot:
+    container_name: leadgen_booking_bot
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: leadgen-booking-bot:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # External business profile allowing instant catalog & triage reconfiguration without image rebuilds
+      - ./business_profile.json:/app/business_profile.json
+      # Persistent SQLite database storage (supports direct root file or /app/data mount)
+      - ./leads.db:/app/leads.db
+      - ./data:/app/data
+      # Google Cloud Service Account credentials mounted with strict read-only protection
+      - ./credentials.json:/app/credentials.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

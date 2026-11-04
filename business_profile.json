@@ -1,0 +1,112 @@
+{
+  "business_name": "TechPro Solutions",
+  "currency": "USD",
+  "support_contact": "@techpro_support",
+  "services": [
+    {
+      "id": "business_automation",
+      "name": "💼 Business Process Automation",
+      "price_hint": "From $500",
+      "description": "End-to-end automation of operational workflows, CRM integration, and analytics pipelines."
+    },
+    {
+      "id": "telegram_bot",
+      "name": "🤖 Custom Telegram Bot Development",
+      "price_hint": "From $350",
+      "description": "High-load AI, LeadGen, and e-commerce bots with payment gateways and Google Sheets sync."
+    },
+    {
+      "id": "cloud_devops",
+      "name": "☁️ Cloud Architecture & DevOps",
+      "price_hint": "From $600",
+      "description": "Scalable cloud infrastructure, CI/CD pipelines, Docker containerization, and K8s setup."
+    },
+    {
+      "id": "consulting",
+      "name": "🔍 Technical Audit & Consulting",
+      "price_hint": "From $200",
+      "description": "Codebase review, architecture assessment, scalability bottleneck analysis, and security audits."
+    }
+  ],
+  "context_triage": {
+    "rules": [
+      {
+        "tag": "URGENT_VIP",
+        "priority": 1,
+        "keywords": [
+          "срочно",
+          "urgent",
+          "asap",
+          "горит",
+          "сегодня",
+          "сейчас",
+          "быстро",
+          "авария",
+          "vip",
+          "критично",
+          "critical",
+          "не работает",
+          "поломка",
+          "упал",
+          "emergency",
+          "sos",
+          "deadline"
+        ],
+        "admin_alert_prefix": "🔥 URGENT_VIP",
+        "custom_user_reply": "⚡️ <b>Приоритет: Высокий (URGENT VIP)</b>\nВаша заявка зарегистрирована с наивысшим приоритетом. Дежурный специалист уже получил срочное уведомление и свяжется с вами в течение 15 минут!"
+      },
+      {
+        "tag": "PRICE_INQUIRY",
+        "priority": 2,
+        "keywords": [
+          "цена",
+          "стоимость",
+          "сколько стоит",
+          "прайс",
+          "расценки",
+          "price",
+          "cost",
+          "how much",
+          "rate",
+          "quote",
+          "бюджет",
+          "budget",
+          "тариф",
+          "скидка",
+          "расчет",
+          "смета",
+          "калькуляция"
+        ],
+        "admin_alert_prefix": "💰 PRICE_INQUIRY",
+        "custom_user_reply": "💰 <b>Запрос стоимости (PRICE INQUIRY)</b>\nСпасибо за интерес к нашим расценкам! Мы подготовим предварительный расчет и смету под ваши задачи перед звонком."
+      },
+      {
+        "tag": "LOW_PRIORITY",
+        "priority": 3,
+        "keywords": [
+          "не к спеху",
+          "потом",
+          "на будущее",
+          "просто спросить",
+          "любопытно",
+          "later",
+          "low priority",
+          "just asking",
+          "someday",
+          "не срочно",
+          "когда-нибудь",
+          "на следующий месяц",
+          "не горит",
+          "планирую позже"
+        ],
+        "admin_alert_prefix": "⏳ LOW_PRIORITY",
+        "custom_user_reply": "📝 <b>Плановый запрос (LOW PRIORITY)</b>\nСпасибо за обращение! Мы сохранили ваш запрос в графике и свяжемся с вами в плановом порядке."
+      }
+    ],
+    "default": {
+      "tag": "STANDARD",
+      "admin_alert_prefix": "📋 STANDARD",
+      "custom_user_reply": "✅ <b>Заявка принята (STANDARD)</b>\nСпасибо за предоставленную информацию! Наш специалист свяжется с вами в ближайшее рабочее время для уточнения деталей."
+    }
+  }
+}
