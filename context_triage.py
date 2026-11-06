@@ -1,54 +1,66 @@
 """Context triage engine for LeadGen & Booking Bot.
 
-This module provides an isolated classification pipeline that evaluates incoming
-lead context (free-form client commentary and requested service) against
-niche-specific triage rules configured in 'business_profile.json'. It also supports
-an extensible hook for optional LLM-driven categorization.
+Provides a deterministic rule-based lead scoring and classification pipeline that
+evaluates incoming client commentary and requested services against niche-specific
+scoring rules configured in 'business_profile.json'. Returns structured triage tags,
+numeric qualification scores, localized auto-replies, and administrator urgency badges.
 """
 
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
+
+from locales import get_text
 
 logger = logging.getLogger(__name__)
 
-# Default path to the external business configuration file
+# Default path to external business configuration file
 DEFAULT_PROFILE_PATH: Path = Path(__file__).resolve().parent / "business_profile.json"
 
-# Type alias for custom LLM classification hook callable
-# Callable signature: (comment_text: str, service: Optional[str]) -> Optional[str] (returning tag name)
-LLMClassifierHook = Callable[[str, Optional[str]], Optional[str]]
-
-# Module-level registry for optional LLM classifier hook
-_CUSTOM_LLM_HOOK: Optional[LLMClassifierHook] = None
-
-# Fallback configuration in case business_profile.json is absent or malformed
-FALLBACK_DEFAULT_RULE: Dict[str, str] = {
-    "tag": "STANDARD",
-    "admin_alert_prefix": "📋 STANDARD",
-    "custom_user_reply": (
-        "✅ <b>Заявка принята (STANDARD)</b>\n"
-        "Спасибо за предоставленную информацию! Наш специалист свяжется с вами "
-        "в ближайшее рабочее время для уточнения деталей."
-    ),
+DEFAULT_TIERS: Dict[str, Dict[str, Any]] = {
+    "URGENT_VIP": {
+        "priority": 1,
+        "score": 100,
+        "admin_alert_prefix": "🔥 URGENT_VIP",
+        "keywords": [
+            "срочно", "urgent", "asap", "горит", "сегодня", "сейчас", "быстро",
+            "авария", "vip", "критично", "critical", "не работает", "поломка",
+            "упал", "emergency", "sos", "deadline", "терміново", "термінова",
+            "не працює", "зламалося", "швидко", "сьогодні", "зараз",
+        ],
+    },
+    "PRICE_INQUIRY": {
+        "priority": 2,
+        "score": 70,
+        "admin_alert_prefix": "💰 PRICE_INQUIRY",
+        "keywords": [
+            "цена", "стоимость", "сколько стоит", "прайс", "расценки", "price",
+            "cost", "how much", "rate", "quote", "бюджет", "budget", "тариф",
+            "скидка", "расчет", "смета", "калькуляция", "ціна", "вартість",
+            "скільки коштує", "кошторис", "знижка", "розрахунок",
+        ],
+    },
+    "LOW_PRIORITY": {
+        "priority": 3,
+        "score": 30,
+        "admin_alert_prefix": "⏳ LOW_PRIORITY",
+        "keywords": [
+            "не к спеху", "потом", "на будущее", "просто спросить", "любопытно",
+            "later", "low priority", "just asking", "someday", "не срочно",
+            "когда-нибудь", "на следующий месяц", "не горит", "планирую позже",
+            "не до поспіху", "пізніше", "на майбутнє", "просто запитати",
+            "колись", "не терміново",
+        ],
+    },
+    "STANDARD": {
+        "priority": 4,
+        "score": 10,
+        "admin_alert_prefix": "📋 STANDARD",
+        "keywords": [],
+    },
 }
-
-
-def register_llm_classifier(hook: Optional[LLMClassifierHook]) -> None:
-    """Register or deregister an extensible LLM classification hook.
-
-    Args:
-        hook: Callable receiving (comment_text, service) and returning a tag string,
-            or None to disable LLM classification.
-    """
-    global _CUSTOM_LLM_HOOK
-    _CUSTOM_LLM_HOOK = hook
-    if hook is not None:
-        logger.info("Custom LLM classification hook registered successfully.")
-    else:
-        logger.info("Custom LLM classification hook cleared.")
 
 
 def load_business_profile(
@@ -60,13 +72,13 @@ def load_business_profile(
         profile_path: Filesystem path to business_profile.json.
 
     Returns:
-        Dict[str, Any]: Parsed configuration dictionary. Returns an empty dict
-        on read or deserialization failure to preserve bot uptime.
+        Dict[str, Any]: Parsed configuration dictionary. Returns fallback structure
+        on read or deserialization failure to preserve uptime.
     """
     path_obj = Path(profile_path).resolve()
     if not path_obj.is_file():
         logger.warning(
-            "Business profile configuration not found at '%s'. Using fallback rules.",
+            "Business profile configuration not found at '%s'. Using built-in default rules.",
             path_obj,
         )
         return {}
@@ -89,112 +101,130 @@ def load_business_profile(
 
 
 def analyze_lead_context(
-    comment_text: Optional[str],
+    comment_text: Optional[str] = None,
     service: Optional[str] = None,
     profile_path: Union[str, Path] = DEFAULT_PROFILE_PATH,
-) -> Dict[str, str]:
+    lang: str = "en",
+    *,
+    comment: Optional[str] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
     """Evaluate client commentary and requested service against business rules.
 
-    Checks optional LLM classification first, followed by pattern/keyword matching
-    against priority-ordered rules in 'business_profile.json'. Falls back to the
-    default triage specification if no match is identified or comment is empty.
+    Performs deterministic pattern/keyword matching against priority-ordered rules
+    in 'business_profile.json', returning structured categorization tags
+    (URGENT_VIP, PRICE_INQUIRY, LOW_PRIORITY, STANDARD) and numeric qualification scores.
+    Resolves custom user reply strings trilingually based on the client's locale.
+
+    Supports both (comment_text, service, profile_path, lang) and
+    (comment, lang='en') invocation forms for API compatibility.
 
     Args:
-        comment_text: Free-form text provided by the client, or None if skipped.
-        service: Name of the service selected by the client.
-        profile_path: Filesystem path to the business profile configuration.
+        comment_text: Free-form commentary text provided by client (or None).
+        service: Name of the service selected by client.
+        profile_path: Filesystem path to business_profile.json.
+        lang: Target locale code ('en', 'uk', 'ru') for auto-replies.
+        comment: Keyword alias for commentary text.
+        **kwargs: Optional additional parameters (e.g. lang override).
 
     Returns:
-        Dict[str, str]: Structured categorization payload containing:
-            - 'context_tag': String identifier ('URGENT_VIP', 'PRICE_INQUIRY', etc.)
-            - 'custom_user_reply': Tailored reply message for the client.
+        Dict[str, Any]: Structured triage payload:
+            - 'context_tag': Category string ('URGENT_VIP', 'PRICE_INQUIRY', etc.)
+            - 'score': Numeric score integer (e.g., 100, 70, 30, 10).
+            - 'priority': Priority ranking integer (1, 2, 3, 4).
+            - 'custom_user_reply': Localized reply message formatted for client.
             - 'admin_alert_prefix': Urgent badge/prefix for administrator notifications.
     """
+    raw_comment = comment if comment is not None else comment_text
+    actual_lang = lang
+
+    if isinstance(service, str) and service in ("en", "uk", "ru") and "lang" not in kwargs and lang == "en":
+        actual_lang = service
+        service = None
+
+    if "lang" in kwargs:
+        actual_lang = str(kwargs["lang"])
+
     profile = load_business_profile(profile_path)
     triage_config: Dict[str, Any] = profile.get("context_triage", {})
-    rules: List[Dict[str, Any]] = triage_config.get("rules", [])
-    default_config: Dict[str, str] = triage_config.get(
-        "default", FALLBACK_DEFAULT_RULE
-    )
+    configured_rules: List[Dict[str, Any]] = triage_config.get("rules", [])
+    default_config: Dict[str, str] = triage_config.get("default", {})
 
-    default_result: Dict[str, str] = {
-        "context_tag": str(default_config.get("tag", "STANDARD")),
-        "custom_user_reply": str(
-            default_config.get(
-                "custom_user_reply",
-                FALLBACK_DEFAULT_RULE["custom_user_reply"],
-            )
-        ),
-        "admin_alert_prefix": str(
-            default_config.get(
-                "admin_alert_prefix",
-                FALLBACK_DEFAULT_RULE["admin_alert_prefix"],
-            )
-        ),
+    default_tag = str(default_config.get("tag", "STANDARD"))
+    default_tier = DEFAULT_TIERS.get(default_tag, DEFAULT_TIERS["STANDARD"])
+    default_alert_prefix = str(
+        default_config.get("admin_alert_prefix", default_tier["admin_alert_prefix"])
+    )
+    default_reply = get_text(f"triage_{default_tag}", lang=actual_lang)
+
+    default_result: Dict[str, Any] = {
+        "context_tag": default_tag,
+        "score": int(default_tier["score"]),
+        "priority": int(default_tier["priority"]),
+        "custom_user_reply": default_reply,
+        "admin_alert_prefix": default_alert_prefix,
     }
 
-    # Handle empty or skipped commentary
-    cleaned_comment = (comment_text or "").strip()
+    cleaned_comment = (raw_comment or "").strip()
     if not cleaned_comment:
         return default_result
 
-    # 1. Extensible Hook: Optional LLM-driven classification
-    if _CUSTOM_LLM_HOOK is not None:
-        try:
-            llm_tag = _CUSTOM_LLM_HOOK(cleaned_comment, service)
-            if llm_tag:
-                normalized_llm_tag = llm_tag.strip().upper()
-                for rule in rules:
-                    if str(rule.get("tag", "")).upper() == normalized_llm_tag:
-                        logger.info(
-                            "LLM classifier hook categorized comment as '%s'.",
-                            normalized_llm_tag,
-                        )
-                        return {
-                            "context_tag": str(rule.get("tag", normalized_llm_tag)),
-                            "custom_user_reply": str(
-                                rule.get("custom_user_reply", default_result["custom_user_reply"])
-                            ),
-                            "admin_alert_prefix": str(
-                                rule.get("admin_alert_prefix", default_result["admin_alert_prefix"])
-                            ),
-                        }
-        except Exception as llm_exc:
-            logger.warning(
-                "Custom LLM classification hook execution failed: %s. Falling back to rule engine.",
-                llm_exc,
-            )
+    # Merge configured rules with built-in fallbacks if rule definitions are sparse
+    rules_to_evaluate: List[Dict[str, Any]] = []
+    if configured_rules:
+        rules_to_evaluate = sorted(configured_rules, key=lambda r: r.get("priority", 999))
+    else:
+        for tag_name, meta in sorted(DEFAULT_TIERS.items(), key=lambda i: i[1]["priority"]):
+            if tag_name != "STANDARD":
+                rules_to_evaluate.append(
+                    {
+                        "tag": tag_name,
+                        "priority": meta["priority"],
+                        "score": meta["score"],
+                        "keywords": meta["keywords"],
+                        "admin_alert_prefix": meta["admin_alert_prefix"],
+                    }
+                )
 
-    # 2. Rule Engine: Priority-ordered keyword and regex pattern matching
-    # Sort rules ascending by priority (1 is highest priority)
-    sorted_rules = sorted(rules, key=lambda item: item.get("priority", 999))
     lowered_comment = cleaned_comment.lower()
 
-    for rule in sorted_rules:
+    for rule in rules_to_evaluate:
         tag = str(rule.get("tag", "STANDARD"))
+        rule_tier = DEFAULT_TIERS.get(tag, DEFAULT_TIERS.get("STANDARD", {}))
+        priority_val = int(rule.get("priority", rule_tier.get("priority", 4)))
+        score_val = int(rule.get("score", rule_tier.get("score", 10)))
+        alert_prefix = str(rule.get("admin_alert_prefix", rule_tier.get("admin_alert_prefix", f"📋 {tag}")))
+
         keywords: List[str] = rule.get("keywords", [])
+        matched_count = 0
+
         for kw in keywords:
             cleaned_kw = kw.strip().lower()
             if not cleaned_kw:
                 continue
 
-            # Check boundary match or substring inclusion for multi-word or punctuation expressions
             pattern = rf"(?i)\b{re.escape(cleaned_kw)}\b"
             if re.search(pattern, cleaned_comment) or cleaned_kw in lowered_comment:
-                logger.info(
-                    "Lead context matched triage rule '%s' via keyword '%s'.",
-                    tag,
-                    cleaned_kw,
-                )
-                return {
-                    "context_tag": tag,
-                    "custom_user_reply": str(
-                        rule.get("custom_user_reply", default_result["custom_user_reply"])
-                    ),
-                    "admin_alert_prefix": str(
-                        rule.get("admin_alert_prefix", default_result["admin_alert_prefix"])
-                    ),
-                }
+                matched_count += 1
 
-    # 3. Fallback: Default STANDARD categorization
+        if matched_count > 0:
+            logger.info(
+                "Lead context matched triage tier '%s' (%d hits, score=%d, lang=%s).",
+                tag,
+                matched_count,
+                score_val,
+                actual_lang,
+            )
+            custom_reply = get_text(f"triage_{tag}", lang=actual_lang)
+            if custom_reply == f"triage_{tag}":
+                custom_reply = str(rule.get("custom_user_reply", default_reply))
+
+            return {
+                "context_tag": tag,
+                "score": score_val,
+                "priority": priority_val,
+                "custom_user_reply": custom_reply,
+                "admin_alert_prefix": alert_prefix,
+            }
+
     return default_result
